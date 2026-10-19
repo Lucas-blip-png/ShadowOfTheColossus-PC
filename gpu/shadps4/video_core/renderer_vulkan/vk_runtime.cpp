@@ -109,6 +109,8 @@ Runtime::Runtime(const Instance& instance_, Scheduler& scheduler_)
     };
     access_reuse = !off("SOTC_ACCESS_REUSE");
     access_union = !off("SOTC_ACCESS_UNION");
+    const char* memo = std::getenv("SOTC_ACCESS_MEMO");
+    access_memo_on = memo && memo[0] == '1';
 }
 
 void Runtime::TickFrame() {
@@ -726,8 +728,6 @@ bool Runtime::IsBufferAccessed(const VideoCore::Buffer* handle, u64 offset, u64 
 
 void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                            vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access) {
-    MakeCurrent(handle);
-
     const Interval range = {
         .start = offset,
         .end = offset + size,
@@ -745,6 +745,21 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
         vk::AccessFlagBits2::eDepthStencilAttachmentWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eMemoryWrite | vk::AccessFlagBits2::eTransformFeedbackWriteEXT;
 
+    memory_barrier.srcStageMask |= src_stage;
+    const u32 access = (src_access & WRITE_MASK ? 1u : 0u) | (src_access & READ_MASK ? 2u : 0u);
+    AccessMemo* memo = nullptr;
+    if (access_memo_on) {
+        u64 hash = reinterpret_cast<u64>(handle) ^ range.start * 0x9E3779B97F4A7C15ull ^
+                   range.end << 13 ^ u64(access) << 61;
+        hash = (hash ^ hash >> 31) * 0xFF51AFD7ED558CCDull;
+        memo = &access_memo[(hash ^ hash >> 29) % access_memo.size()];
+        if (memo->epoch == access_epoch && memo->handle == handle && memo->start == range.start &&
+            memo->end == range.end && memo->access == access) {
+            memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
+            return;
+        }
+    }
+    MakeCurrent(handle);
     if (src_access & WRITE_MASK) {
         if (access_union) {
             resource->write_ranges.AddUnion(range);
@@ -759,8 +774,9 @@ void Runtime::AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size
             resource->read_ranges.Add(range);
         }
     }
-
-    memory_barrier.srcStageMask |= src_stage;
+    if (memo) {
+        *memo = {handle, range.start, range.end, access_epoch, access};
+    }
     memory_barrier.srcAccessMask |= src_access & WRITE_MASK;
 }
 
@@ -797,6 +813,7 @@ void Runtime::FlushBarriers() {
         resources.clear();
     }
     active_resources = 0;
+    ++access_epoch;
     resource = nullptr;
 }
 

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "common/interval_set.h"
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -99,6 +101,19 @@ private:
     std::size_t active_resources{};
     bool access_reuse{true};
     bool access_union{true};
+    // sotc: ranges added since the last FlushBarriers (access_epoch), from bloodborne_pc's AccessMemo
+    // (Supermedo 08cd804). Vertex, index and indirect buffers are tracked per draw and the same
+    // ranges come back draw after draw: adding one again changes nothing. SOTC_ACCESS_MEMO=1.
+    struct AccessMemo {
+        const VideoCore::Buffer* handle;
+        u64 start;
+        u64 end;
+        u64 epoch;
+        u32 access;
+    };
+    std::array<AccessMemo, 1024> access_memo{};
+    u64 access_epoch{1};
+    bool access_memo_on{false};
     VideoCore::Image::Barriers image_barriers;
     vk::MemoryBarrier2 memory_barrier{};
 };
