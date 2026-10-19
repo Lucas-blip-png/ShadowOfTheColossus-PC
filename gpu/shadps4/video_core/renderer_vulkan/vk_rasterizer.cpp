@@ -31,6 +31,8 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+// After vk_common.h (via the headers above), which sets the Vulkan header defines first.
+#include <vk_mem_alloc.h>
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -60,6 +62,10 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
         liverpool->BindRasterizer(this);
     }
     memory->SetRasterizer(this);
+    hudless_enabled = instance.FrameGenSupported() && [] {
+        const char* v = std::getenv("SOTC_FG_HUDLESS");
+        return !v || v[0] != '0';
+    }();
 
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
         runtime.FlushBarriers();
@@ -67,7 +73,19 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     });
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    const vk::Device device = instance.GetDevice();
+    const auto destroy = [&](HudlessTarget& target) {
+        if (target.image) {
+            device.destroyImageView(target.view);
+            vmaDestroyImage(instance.GetAllocator(), target.image, target.allocation);
+        }
+    };
+    for (auto& [address, target] : hudless_targets) {
+        destroy(target);
+    }
+    destroy(hudless_clear);
+}
 
 bool Rasterizer::FilterDraw() {
     const auto& regs = liverpool->DrawRegs();
@@ -218,6 +236,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const Pipeline* resolve
         return;
     }
 
+    hudless_ui_info = -1;
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         SotcStats::Drop(1, regs.color_buffers[0].Address(), 0);
@@ -251,6 +270,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const Pipeline* resolve
     } else {
         cmdbuf.draw(regs.num_indices, regs.num_instances.NumInstances(), vertex_offset,
                     instance_offset);
+    }
+    if (hudless_ui_info >= 0 && hudless_vo) {
+        DrawHudless(pipeline, state, is_indexed, s32(vertex_offset), instance_offset);
     }
     DebugState.IncDrawCall();
 

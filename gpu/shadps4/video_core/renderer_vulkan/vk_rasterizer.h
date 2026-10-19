@@ -4,6 +4,7 @@
 #pragma once
 
 #include <chrono>
+#include <unordered_map>
 
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
@@ -130,6 +131,11 @@ public:
     }
 
     std::thread::id GetGpuCommandProcessorThread();
+
+    /// sotc: SOTC_FG (SOTC_FG_HUDLESS=0 turns it off): the game's final composite of the video out
+    /// image at `address` drawn again since the last call, without its UI layer, for frame
+    /// interpolation without the HUD. Draw thread (PrepareFrame). False when there is none.
+    bool TakeHudless(VAddr address, vk::ImageView& view, vk::Extent2D& size);
 #ifdef __linux__
     u32 GetGpuCommandProcessorThreadId();
 #endif
@@ -165,6 +171,9 @@ private:
     u64 commands_since_submit{};
     u64 evict_poll{}; ///< sotc: FlushPeriodic commands without periodic submits
     std::chrono::steady_clock::time_point commands_since{};
+
+    void DrawHudless(const GraphicsPipeline* pipeline, const RenderState& state, bool is_indexed,
+                     s32 vertex_offset, u32 instance_offset);
 
     bool IsComputeMetaClear(const Pipeline* pipeline);
     bool IsComputeImageCopy(const Pipeline* pipeline);
@@ -212,6 +221,23 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool attachment_feedback_loop{};
     bool needs_barrier{};
+
+    /// sotc: frame interpolation without the HUD (TakeHudless). The game composes its UI layer
+    /// (an R8G8B8A8 sRGB render target) over the fp16 scene in one draw into the video out image;
+    /// that draw is repeated into a target of its own with the UI texture bound to a transparent one.
+    struct HudlessTarget {
+        vk::Image image;
+        vk::ImageView view;
+        struct VmaAllocation_T* allocation{};
+        vk::Extent2D size;
+        vk::Format format{};
+        bool fresh{};
+    };
+    std::unordered_map<VAddr, HudlessTarget> hudless_targets; ///< by video out address
+    HudlessTarget hudless_clear; ///< 1x1, all zero: the UI layer for the redraw
+    bool hudless_enabled{};
+    s32 hudless_ui_info{-1};      ///< this draw: image_infos index of the UI texture
+    const VideoCore::Image* hudless_vo{}; ///< this draw: its video out color target
 };
 
 } // namespace Vulkan
