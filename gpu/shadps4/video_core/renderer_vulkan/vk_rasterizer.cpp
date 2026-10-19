@@ -1577,6 +1577,34 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
             image = &texture_cache.GetImage(image_id);
         }
+        // sotc: SOTC_UI_PROBE=<n>: every n-th frame, the draws into the video out surface
+        // (looking for the game's UI pass, for frame generation without the HUD).
+        if (cb == 0 && image->usage.vo_surface) {
+            static const u32 ui_probe = [] {
+                const char* v = std::getenv("SOTC_UI_PROBE");
+                return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0u;
+            }();
+            if (ui_probe) {
+                static const VideoCore::Image* last_vo = nullptr;
+                static u32 vo_frame = 0, vo_draw = 0;
+                if (image != last_vo) {
+                    last_vo = image;
+                    ++vo_frame;
+                    vo_draw = 0;
+                }
+                if (vo_frame % ui_probe == 0) {
+                    std::fprintf(stderr,
+                                 "SOTC UI probe frame %u draw %u image %p: vs %#llx ps %#llx "
+                                 "blend %u mrt %#x indices %u\n",
+                                 vo_frame, vo_draw, static_cast<const void*>(image),
+                                 static_cast<unsigned long long>(key.stage_hashes[3]),
+                                 static_cast<unsigned long long>(key.stage_hashes[0]),
+                                 u32(key.blend_controls[0].enable), u32(key.mrt_mask),
+                                 u32(regs.num_indices));
+                }
+                ++vo_draw;
+            }
+        }
         texture_cache.UpdateImage(image_id);
         runtime.SetBackingSamples(image, key.color_samples[cb]);
         const auto& image_view = texture_cache.FindRenderTarget(image_id, desc, !rt_fast);
