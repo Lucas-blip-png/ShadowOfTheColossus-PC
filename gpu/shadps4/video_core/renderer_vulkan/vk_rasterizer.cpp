@@ -36,6 +36,13 @@
 
 namespace Vulkan {
 
+// sotc: SOTC_UI_PROBE_PS: the current draw's fragment permutation hash matches it.
+static bool ui_probe_draw = false;
+static const u64 ui_probe_ps = [] {
+    const char* v = std::getenv("SOTC_UI_PROBE_PS");
+    return v ? std::strtoull(v, nullptr, 0) : 0ULL;
+}();
+
 static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     // TODO(roamic): Add support for multiple viewports and geometry shaders when ViewportIndex
     // is encountered and implemented in the recompiler.
@@ -218,6 +225,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const Pipeline* resolve
         return;
     }
 
+    ui_probe_draw = ui_probe_ps && pipeline->GetGraphicsKey().stage_hashes[0] == ui_probe_ps;
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         SotcStats::Drop(1, regs.color_buffers[0].Address(), 0);
@@ -1321,6 +1329,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
     for (const auto& image_desc : stage.images) {
         const auto tsharp = image_desc.GetSharp(stage);
+        // sotc: SOTC_UI_PROBE_PS=<hash>: the textures that shader reads (every 900th time).
+        const u64 probe_ps = ui_probe_ps;
+        if (ui_probe_draw && stage.sw_stage == Shader::SwStage::Fragment) {
+            static u32 calls = 0;
+            if (&image_desc == &stage.images.front()) {
+                ++calls;
+            }
+            if (calls % 300 >= 1 && calls % 300 <= 4) {
+                std::fprintf(stderr, "SOTC UI probe ps %#llx tex %u: %#llx %ux%u dfmt %u nfmt %u\n",
+                             static_cast<unsigned long long>(probe_ps),
+                             u32(&image_desc - &stage.images.front()),
+                             static_cast<unsigned long long>(tsharp.Address()),
+                             u32(tsharp.width + 1), u32(tsharp.height + 1),
+                             u32(tsharp.GetDataFmt()), u32(tsharp.GetNumberFmt()));
+            }
+        }
         if (image_desc.array_size != 0) {
             // dynamic_tsharp_array_size (from Pink-shadPS4): one binding per table element, then a
             // null one for out-of-range indices. The shader was typed after `tsharp`, the first
@@ -1577,32 +1601,38 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
             image = &texture_cache.GetImage(image_id);
         }
-        // sotc: SOTC_UI_PROBE=<n>: every n-th frame, the draws into the video out surface
-        // (looking for the game's UI pass, for frame generation without the HUD).
-        if (cb == 0 && image->usage.vo_surface) {
+        // sotc: SOTC_UI_PROBE=<n>: every n-th draw into the video out surface, the 64 draws up to
+        // it (looking for the game's UI pass, for frame generation without the HUD).
+        if (cb == 0) {
             static const u32 ui_probe = [] {
                 const char* v = std::getenv("SOTC_UI_PROBE");
                 return v ? static_cast<u32>(std::strtoul(v, nullptr, 10)) : 0u;
             }();
             if (ui_probe) {
-                static const VideoCore::Image* last_vo = nullptr;
-                static u32 vo_frame = 0, vo_draw = 0;
-                if (image != last_vo) {
-                    last_vo = image;
-                    ++vo_frame;
-                    vo_draw = 0;
+                struct ProbeDraw {
+                    VAddr rt;
+                    u32 width, height, format, blend, indices;
+                    u64 vs, ps;
+                };
+                static std::array<ProbeDraw, 64> ring{};
+                static u32 ring_pos = 0, vo_draws = 0;
+                ring[ring_pos++ % ring.size()] = {
+                    regs.color_buffers[0].Address(), image->info.size.width,
+                    image->info.size.height, static_cast<u32>(image->info.pixel_format),
+                    u32(key.blend_controls[0].enable), u32(regs.num_indices),
+                    key.stage_hashes[3], key.stage_hashes[0]};
+                if (image->usage.vo_surface && ++vo_draws % ui_probe == 0) {
+                    for (u32 i = 0; i < ring.size(); ++i) {
+                        const auto& d = ring[(ring_pos + i) % ring.size()];
+                        std::fprintf(stderr,
+                                     "SOTC UI probe %u #%02u: rt %#llx %ux%u fmt %u blend %u "
+                                     "indices %u vs %#llx ps %#llx\n",
+                                     vo_draws, i, static_cast<unsigned long long>(d.rt), d.width,
+                                     d.height, d.format, d.blend, d.indices,
+                                     static_cast<unsigned long long>(d.vs),
+                                     static_cast<unsigned long long>(d.ps));
+                    }
                 }
-                if (vo_frame % ui_probe == 0) {
-                    std::fprintf(stderr,
-                                 "SOTC UI probe frame %u draw %u image %p: vs %#llx ps %#llx "
-                                 "blend %u mrt %#x indices %u\n",
-                                 vo_frame, vo_draw, static_cast<const void*>(image),
-                                 static_cast<unsigned long long>(key.stage_hashes[3]),
-                                 static_cast<unsigned long long>(key.stage_hashes[0]),
-                                 u32(key.blend_controls[0].enable), u32(key.mrt_mask),
-                                 u32(regs.num_indices));
-                }
-                ++vo_draw;
             }
         }
         texture_cache.UpdateImage(image_id);
