@@ -22,8 +22,8 @@ What it adds (each piece has a switch to turn it off):
   target between 30 and 60. Not yet confirmed at colossi 2 and 5 (`SOTC_MODES=af16` goes back).
 - **CPUs without BMI1/LZCNT/MOVBE** (Intel before Haswell: 2nd/3rd generation Core, Xeon E3 v1/v2;
   AMD FX), which got "This CPU is not supported": the game's ~5,000 such instructions are replaced
-  by equivalent routines at startup, only on those CPUs (Oussama268). AVX is still required. Not
-  yet confirmed on a real one.
+  by equivalent routines at startup, only on those CPUs (Oussama268). AVX is still required.
+  Confirmed on a real one (issue #88 of the original: played up to the first colossus).
 - **Heap guards no longer rebuilt every frame** (+6% at the Shrine): readbacks that land in
   in-use blocks of the game's heaps skip the allocator guard, which was rebuilt about once per
   frame (`SOTC_HEAP_FAST=0`).
